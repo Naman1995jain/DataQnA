@@ -32,7 +32,7 @@ Demonstrates the flow of control between frontend, backend, and LLM during query
 
 ### 🧠 System Flow Diagram
 High-level architecture showing modules like Chat, Data Explorer, Feedback, and Vector Store.
-![System Flow Diagram](images/system_flow_diagram.png)
+![System Flow Diagram](images/System_flow_diagram.png)
 
 ---
 
