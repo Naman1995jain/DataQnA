@@ -1,0 +1,84 @@
+/* Custom styling for the AI Data Analyst app */
+
+/* Main container styling */
+.main {
+    padding: 1rem;
+}
+
+/* Chat message styling */
+.chat-message {
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin-bottom: 1rem;
+    line-height: 1.5;
+}
+
+.user-message {
+    background-color: #f0f2f6;
+}
+
+.assistant-message {
+    background-color: #e6f3ff;
+}
+
+/* Custom metric styling */
+.custom-metric {
+    background-color: #f0f2f6;
+    padding: 1rem;
+    border-radius: 0.5rem;
+    text-align: center;
+    margin-bottom: 1rem;
+}
+
+.custom-metric h3 {
+    font-size: 1rem;
+    color: #555;
+    margin-bottom: 0.5rem;
+}
+
+.custom-metric h2 {
+    font-size: 1.5rem;
+    color: #1f77b4;
+    margin-bottom: 0.5rem;
+}
+
+.custom-metric p {
+    font-size: 0.9rem;
+    color: #777;
+}
+
+/* Sidebar styling */
+.sidebar .sidebar-content {
+    padding: 1rem;
+}
+
+/* Button styling */
+.stButton>button {
+    width: 100%;
+}
+
+/* Expander styling */
+.streamlit-expanderHeader {
+    font-weight: bold;
+    color: #1f77b4;
+}
+
+/* Table styling */
+.dataframe {
+    font-size: 0.9rem;
+}
+
+/* Code block styling */
+code {
+    background-color: #f0f2f6;
+    padding: 0.2rem 0.4rem;
+    border-radius: 0.2rem;
+    font-size: 0.9rem;
+}
+
+pre {
+    background-color: #f0f2f6;
+    padding: 1rem;
+    border-radius: 0.5rem;
+    overflow-x: auto;
+}
