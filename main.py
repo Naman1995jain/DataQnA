@@ -21,6 +21,10 @@ from llama_index.core import Document
 from llama_index.core.callbacks import CallbackManager, TokenCountingHandler
 from pathlib import Path
 import base64
+import fitz  # PyMuPDF
+from pdf2image import convert_from_bytes
+import pytesseract
+from typing import Optional, List
 
 import streamlit as st
 
@@ -34,6 +38,8 @@ load_dotenv()
 openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
 if not openrouter_api_key:
     raise ValueError("OPENROUTER_API_KEY not found in environment variables")
+elif not openrouter_api_key.startswith('sk-or-v1-'):
+    raise ValueError("Invalid OpenRouter API key format. Key should start with 'sk-or-v1-'")
 
 # -----------------------------
 # Session & State Management
@@ -41,12 +47,23 @@ if not openrouter_api_key:
 if "id" not in st.session_state:
     st.session_state.id = uuid.uuid4()
     st.session_state.file_cache = {}
-    st.session_state.messages = []
+    st.session_state.uploaded_files = {}  # Dictionary to store multiple files
+    st.session_state.data_messages = []
+    st.session_state.doc_messages = []
     st.session_state.response_times = []
     st.session_state.token_counts = []
     st.session_state.ratings = []
     st.session_state.source_feedback = []
     st.session_state.current_file = None
+    st.session_state.selected_file = None  # Currently selected file for chat
+
+# Initialize chat history
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = {
+        "data": [],  # For data analysis chat
+        "document": [],  # For document chat
+        "current_file": None  # Track the current file
+    }
 
 session_id = st.session_state.id
 
@@ -54,9 +71,11 @@ session_id = st.session_state.id
 class Config:
     DEFAULT_MODEL = "mistralai/mistral-small-3.1-24b-instruct:free"
     DEFAULT_EMBEDDING = "BAAI/bge-large-en-v1.5"
-    SUPPORTED_FILE_TYPES = ["xlsx", "xls", "csv"]
+    SUPPORTED_FILE_TYPES = ["xlsx", "xls", "csv", "json", "pdf"]
     MAX_FILE_SIZE_MB = 300
     TOKEN_LIMIT = 9000
+    supported_structured_data = ["xlsx", "xls", "csv", "json"]
+    supported_documents = ["pdf"]
 
 # Add error handling decorator
 def handle_exceptions(func):
@@ -83,34 +102,95 @@ def validate_file(file):
 @st.cache_resource
 def load_llm(api_key: str, model_name: str = Config.DEFAULT_MODEL):
     # Create an LLM instance using the provided OpenRouter API key.
-    llm = OpenRouter(
-        api_key=api_key,
-        model=model_name,
-        request_timeout=10000.0
-    )
-    return llm
+    try:
+        llm = OpenRouter(
+            api_key=api_key,
+            model=model_name,
+            request_timeout=10000.0,
+            headers={"HTTP-Referer": "https://localhost:8501"}  # Add referer for API validation
+        )
+        # Test the API key with a simple request
+        llm.complete("test")
+        return llm
+    except Exception as e:
+        if "401" in str(e):
+            raise ValueError("OpenRouter API key authentication failed. Please check your API key.")
+        else:
+            raise e
 
 def display_file(file):
     # Function kept for compatibility but doesn't display preview
     pass
 
+def process_pdf(file) -> str:
+    """Process a PDF file and extract its text content"""
+    try:
+        # Read PDF file bytes
+        pdf_bytes = file.read()
+        
+        # Try PyMuPDF first for text extraction
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text_content = []
+        
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            text_content.append(page.get_text())
+        
+        full_text = "\n".join(text_content)
+        
+        # If text extraction yields empty or minimal results, try OCR
+        if len(full_text.strip()) < 100:  # Arbitrary threshold for minimum text
+            # Convert PDF to images
+            images = convert_from_bytes(pdf_bytes)
+            ocr_text = []
+            
+            for img in images:
+                # Perform OCR on each page
+                page_text = pytesseract.image_to_string(img)
+                ocr_text.append(page_text)
+            
+            full_text = "\n".join(ocr_text)
+        
+        doc.close()
+        return full_text
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
+        return None
+
 def read_file_to_text(file):
+    """Enhanced file reading function with PDF support"""
     file_extension = os.path.splitext(file.name)[1].lower()
     try:
-        if file_extension == ".csv":
+        if file_extension == ".pdf":
+            text_content = process_pdf(file)
+            if text_content:
+                return f"Document Content:\n\n{text_content}"
+            return None
+        elif file_extension == ".csv":
             df = pd.read_csv(file)
+        elif file_extension == ".json":
+            # Handle different JSON formats (records, split, etc.)
+            try:
+                df = pd.read_json(file, orient='records')
+            except:
+                try:
+                    df = pd.read_json(file, orient='split')
+                except:
+                    json_data = json.load(file)
+                    if isinstance(json_data, dict):
+                        df = pd.DataFrame([json_data])
+                    elif isinstance(json_data, list):
+                        df = pd.DataFrame(json_data)
+                    else:
+                        raise ValueError("Unsupported JSON structure")
         else:  # Excel files
             df = pd.read_excel(file)
         
-        # Get data summary
+        # Get data summary for structured data
         data_summary = get_data_summary(df)
-        
-        # Convert DataFrame to a formatted string
         buffer = io.StringIO()
         df.info(buf=buffer)
         df_info = buffer.getvalue()
-        
-        # Only include a sample of the data to avoid token limits
         df_sample = df.head(20).to_string()
         
         return f"Data Summary:\n{data_summary}\n\nDataFrame Info:\n{df_info}\n\nSample Data (first 20 rows):\n{df_sample}"
@@ -119,33 +199,34 @@ def read_file_to_text(file):
         return None
 
 def format_response(text):
-    """Format response to show output only"""
+    """Format response to show output only and handle visualizations"""
     # Split the response into parts
     parts = text.split("```")
-    formatted = text
+    output_parts = []
     
-    # If there are code blocks, extract only the output
+    # If there are code blocks, extract output and filter visualization blocks
     if len(parts) > 1:
-        output_parts = []
         for i, part in enumerate(parts):
             if i % 2 == 0:  # Regular text
-                output_parts.append(part)
+                # Clean up any trailing "Here's a visualization:" type text
+                cleaned_text = re.sub(r'\n*Here\'s? (?:a |the )?visualization.*$', '', part, flags=re.IGNORECASE)
+                cleaned_text = re.sub(r'\n*I\'ll create (?:a |the )?visualization.*$', '', cleaned_text, flags=re.IGNORECASE)
+                cleaned_text = re.sub(r'\n*Let me show (?:a |the )?visualization.*$', '', cleaned_text, flags=re.IGNORECASE)
+                if cleaned_text.strip():
+                    output_parts.append(cleaned_text)
             else:  # Code block
-                # Check if this is a visualization block
-                if part.strip().startswith("visualization"):
-                    # Don't include visualization blocks in the output
-                    continue
-                
-                # Remove the language identifier if present
-                lines = part.split('\n')
-                if len(lines) > 1:
-                    # Skip language identifier line and empty lines
-                    content = '\n'.join(line for line in lines[1:] if line.strip())
-                    if content:
-                        output_parts.append(f'📊 Output:\n{content}')
-        formatted = '\n\n'.join(output_parts)
+                # Skip visualization blocks entirely
+                if not part.strip().startswith("visualization"):
+                    # Handle other code blocks
+                    lines = part.split('\n')
+                    if len(lines) > 1:
+                        content = '\n'.join(line for line in lines[1:] if line.strip())
+                        if content:
+                            output_parts.append(f'📊 Output:\n{content}')
+    else:
+        output_parts = [text]
     
-    return formatted
+    return '\n\n'.join(part for part in output_parts if part.strip())
 
 def get_dataframe_from_file(file):
     """Load a DataFrame from the uploaded file"""
@@ -154,6 +235,20 @@ def get_dataframe_from_file(file):
     
     if file_extension == ".csv":
         return pd.read_csv(file)
+    elif file_extension == ".json":
+        try:
+            return pd.read_json(file, orient='records')
+        except:
+            try:
+                return pd.read_json(file, orient='split')
+            except:
+                json_data = json.load(file)
+                if isinstance(json_data, dict):
+                    return pd.DataFrame([json_data])
+                elif isinstance(json_data, list):
+                    return pd.DataFrame(json_data)
+                else:
+                    raise ValueError("Unsupported JSON structure")
     else:  # Excel files
         return pd.read_excel(file)
 
@@ -177,11 +272,115 @@ class PerformanceMonitor:
 if "performance_monitor" not in st.session_state:
     st.session_state.performance_monitor = PerformanceMonitor()
 
-# Load custom CSS
+# -----------------------------
+# App Configuration & Styling
+# -----------------------------
+st.set_page_config(
+    page_title="DataQnA AI",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': 'https://github.com/yourusername/dataqna-ai',
+        'Report a bug': "https://github.com/yourusername/dataqna-ai/issues",
+        'About': "# DataQnA AI\nAn intelligent platform for natural language data analytics."
+    }
+)
+
+# Add header component
+def display_header():
+    with st.container():
+        st.markdown("""
+            <div class="navbar">
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 1rem;">
+                    <div style="display: flex; align-items: center; gap: 1rem;">
+                        <h1 style="margin: 0;">🤖 DataQnA AI</h1>
+                    </div>
+                    <div class="nav-links" style="display: flex; gap: 1rem;">
+                        <a href="#" class="nav-link tooltip" data-tooltip="View Documentation">📚</a>
+                        <a href="#" class="nav-link tooltip" data-tooltip="Settings">⚙️</a>
+                        <a href="#" class="nav-link tooltip" data-tooltip="Help">❓</a>
+                    </div>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+# Call header at the start of the app
+display_header()
+
+# Custom theme initialization
+def init_theme():
+    # Detect system theme
+    is_dark_theme = st.get_option("theme.base") == "dark"
+    theme_class = "dark" if is_dark_theme else "light"
+    
+    # Inject theme class
+    st.markdown(f"""
+        <div data-theme="{theme_class}">
+        <style>
+            /* Theme-specific overrides */
+            .stApp {{
+                background-color: var(--background);
+                color: var(--text);
+            }}
+            
+            .stButton>button {{
+                border-radius: 8px;
+                padding: 0.5rem 1rem;
+                border: 1px solid var(--border);
+                background-color: var(--background);
+                color: var(--text);
+                transition: all 0.2s ease;
+            }}
+            
+            .stButton>button:hover {{
+                transform: translateY(-2px);
+                box-shadow: var(--shadow-md);
+            }}
+            
+            .stTextInput>div>div>input {{
+                border-radius: 8px;
+                border: 1px solid var(--border);
+                background-color: var(--background);
+                color: var(--text);
+            }}
+            
+            .stSelectbox>div>div>div {{
+                border-radius: 8px;
+                border: 1px solid var(--border);
+                background-color: var(--background);
+                color: var(--text);
+            }}
+            
+            .stTabs {{
+                background-color: var(--background);
+                border-radius: 8px;
+                padding: 1rem;
+                margin-bottom: 1rem;
+            }}
+        </style>
+        </div>
+    """, unsafe_allow_html=True)
+
+# Load custom CSS and setup theme
 def load_custom_css():
     css_file = Path(__file__).parent / "styles" / "custom.css"
     with open(css_file) as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+        css_content = f.read()
+    
+    # Detect if dark theme is enabled in Streamlit
+    is_dark_theme = st.get_option("theme.base") == "dark"
+    theme_class = "dark" if is_dark_theme else "light"
+    
+    # Inject the CSS with theme detection
+    st.markdown(f"""
+        <style>
+            {css_content}
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Close the theme div at the bottom of the page
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # Add custom components
 def custom_metric(label, value, delta=None):
@@ -195,39 +394,128 @@ def custom_metric(label, value, delta=None):
     st.markdown(html, unsafe_allow_html=True)
 
 # Update page config with custom theme
-st.set_page_config(
-    page_title="AI Data Analyst",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Load custom CSS
 load_custom_css()
+
+# ====== Customize prompt template for multi-file support ======
+qa_prompt_tmpl_str = (
+    "You are analyzing the file: {file_name}\n\n"
+    "Context information is below.\n"
+    "---------------------\n"
+    "{context_str}\n"
+    "---------------------\n"
+    "Given the context information above, follow these rules:\n"
+    "1. When analyzing structured data (CSV, Excel, JSON):\n"
+    "   - Focus on showing results and insights\n"
+    "   - Present numerical results in a clear format\n"
+    "   - Suggest visualizations when appropriate using the visualization format\n"
+    "2. When analyzing documents (PDF):\n"
+    "   - Provide concise summaries\n"
+    "   - Extract key points and insights\n"
+    "   - Quote relevant passages in markdown format\n"
+    "   - Cite page numbers when available\n"
+    "3. General rules:\n"
+    "   - Keep explanations clear and concise\n"
+    "   - Use bullet points for lists\n"
+    "   - Don't show implementation details\n"
+    "4. For data visualizations, use this format:\n"
+    "```visualization\n"
+    "{\n"
+    '  "type": "bar|line|scatter|pie|histogram|heatmap",\n'
+    '  "x_column": "column_name",\n'
+    '  "y_column": "column_name",  # Optional for some chart types\n'
+    '  "color_column": "column_name",  # Optional\n'
+    '  "title": "Chart Title"\n'
+    "}\n"
+    "```\n"
+    "Query: {query_str}\n"
+    "Answer: ")
 
 # -----------------------------
 # Sidebar - Config & Navigation
 # -----------------------------
-with st.sidebar:
-    # Configuration section first
+# Enhanced file upload component
+def display_file_upload_zone():
     st.markdown("""
-        <div style="text-align: center; padding: 1.5rem 0;">
+        <div class="upload-zone">
+            <div style="text-align: center;">
+                <p style="font-size: 0.8rem; color: var(--text); opacity: 0.6;">
+                    Supported formats: CSV, Excel, JSON, PDF
+                </p>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+# Update sidebar file upload section
+with st.sidebar:
+    st.markdown("""
+        <div style="text-align: center; padding: 1rem 0;">
             <h2 style="color: var(--primary-color);">⚙️ Configuration</h2>
         </div>
     """, unsafe_allow_html=True)
     
-    st.header("📂 Upload Documents")
-    uploaded_file = st.file_uploader("Choose a file (.xlsx, .xls, or .csv)", type=["xlsx", "xls", "csv"])
+    # Display modern file upload zone
+    display_file_upload_zone()
     
-    st.markdown("### 🧠 Model")
-    st.info("Using Mistral Small (Free)")
-    model_key = "mistralai/mistral-small-3.1-24b-instruct:free"
+    file_type = st.radio(
+        "Select file type",
+        ["Structured Data (CSV, Excel, JSON)", "Documents (PDF)"],
+        key="file_type",
+        help="Choose the type of files you want to analyze"
+    )
     
-    # Fixed embedding model
-    st.markdown("### 🔍 Embedding Model")
-    st.info("Using BAAI/bge-large-en-v1.5")
-    embedding_key = "BAAI/bge-large-en-v1.5"
+    # Multiple file uploader based on type
+    if file_type == "Structured Data (CSV, Excel, JSON)":
+        uploaded_files = st.file_uploader(
+            "Choose files",
+            type=["xlsx", "xls", "csv", "json"],
+            accept_multiple_files=True,
+            help="Upload structured data files for analysis and visualization"
+        )
+    else:
+        uploaded_files = st.file_uploader(
+            "Choose PDF documents",
+            type=["pdf"],
+            accept_multiple_files=True,
+            help="Upload PDF documents for text analysis and Q&A"
+        )
     
+    # Store uploaded files in session state without displaying the list
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            model_key = Config.DEFAULT_MODEL
+            embedding_key = Config.DEFAULT_EMBEDDING
+            file_key = f"{session_id}-{uploaded_file.name}-{model_key}-{embedding_key}"
+            
+            # Only process new files
+            if file_key not in st.session_state.uploaded_files:
+                st.session_state.uploaded_files[file_key] = uploaded_file
+                st.info(f"Processing: {uploaded_file.name}")
+                
+                try:
+                    # Convert file content to text
+                    file_content = read_file_to_text(uploaded_file)
+                    if file_content:
+                        docs = [Document(text=file_content)]
+                        
+                        # Setup LLM & embedding model
+                        llm = load_llm(openrouter_api_key, model_key)
+                        embed_model = HuggingFaceEmbedding(model_name=embedding_key, trust_remote_code=True)
+                        
+                        # Create index
+                        Settings.embed_model = embed_model
+                        node_parser = MarkdownNodeParser()
+                        index = VectorStoreIndex.from_documents(documents=docs, transformations=[node_parser], show_progress=True)
+                        
+                        # Create the query engine
+                        Settings.llm = llm
+                        query_engine = index.as_query_engine(streaming=True)
+                        
+                        # Store in file cache
+                        st.session_state.file_cache[file_key] = query_engine
+                        st.success(f"✅ {uploaded_file.name} processed successfully!")
+                except Exception as e:
+                    st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+
     st.markdown("<hr>", unsafe_allow_html=True)
     
     # Navigation section moved below
@@ -240,156 +528,309 @@ with st.sidebar:
     # Navigation selection
     selected_section = st.radio(
         "Select Section",
-        ["Chat", "Data Explorer", "Performance Analytics"],
+        ["Data Chat", "Document Chat", "Data Explorer", "Performance Analytics", "File Manager"],
         key="navigation"
     )
-
-    # Store the uploaded file in session state
-    if uploaded_file:
-        st.session_state.current_file = uploaded_file
-        file_key = f"{session_id}-{uploaded_file.name}-{model_key}-{embedding_key}"
-        st.info("Indexing your document...")
-
-        if file_key not in st.session_state.get('file_cache', {}):
-            try:
-                # Convert file content to text
-                file_content = read_file_to_text(uploaded_file)
-                if file_content:
-                    docs = [Document(text=file_content)]
-                    
-                    # Setup LLM & embedding model
-                    llm = load_llm(openrouter_api_key, model_key)
-                    embed_model = HuggingFaceEmbedding(model_name=embedding_key, trust_remote_code=True)
-                    
-                    # Create index
-                    Settings.embed_model = embed_model
-                    node_parser = MarkdownNodeParser()
-                    index = VectorStoreIndex.from_documents(documents=docs, transformations=[node_parser], show_progress=True)
-
-                    # Create the query engine with streaming responses
-                    Settings.llm = llm
-                    query_engine = index.as_query_engine(streaming=True)
-
-                    # ====== Customize prompt template ======
-                    qa_prompt_tmpl_str = (
-                        "Context information is below.\n"
-                        "---------------------\n"
-                        "{context_str}\n"
-                        "---------------------\n"
-                        "Given the context information above, follow these rules:\n"
-                        "1. Focus on showing results and insights\n"
-                        "2. Present numerical results in a clear format\n"
-                        "3. Use bullet points for lists\n"
-                        "4. Keep explanations concise\n"
-                        "5. Don't show code implementation details\n"
-                        "6. When appropriate, suggest a visualization by including a JSON block like this:\n"
-                        "```visualization\n"
-                        "{\n"
-                        '  "type": "bar|line|scatter|pie|histogram|heatmap",\n'
-                        '  "x_column": "column_name",\n'
-                        '  "y_column": "column_name",  # Optional for some chart types\n'
-                        '  "color_column": "column_name",  # Optional\n'
-                        '  "title": "Chart Title"\n'
-                        "}\n"
-                        "```\n"
-                        "Query: {query_str}\n"
-                        "Answer: "
-                    )
-                    qa_prompt_tmpl = PromptTemplate(qa_prompt_tmpl_str)
-                    query_engine.update_prompts(
-                        {"response_synthesizer:text_qa_template": qa_prompt_tmpl}
-                    )
-
-                    st.session_state.file_cache[file_key] = query_engine
-
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
-                st.stop()
-        else:
-            query_engine = st.session_state.file_cache[file_key]
-
-        st.success("✅ Ready to Chat!")
 
 # -----------------------------
 # Main Content Area
 # -----------------------------
-if selected_section == "Chat":
-    st.markdown(
-        """
-        <h1 style="color: #4B8BBE; text-align: center;">🤖 AI Data Analyst</h1>
-        <h3 style="text-align: center;">Ask questions about your data in natural language</h3>
-        """,
-        unsafe_allow_html=True,
-    )
-    
-    # Chat interface code
-    # Display previous chat messages and chat input
-    for message in st.session_state.messages:
-        message_class = "user-message" if message["role"] == "user" else "assistant-message"
-        with st.chat_message(message["role"]):
-            st.markdown(f'<div class="chat-message {message_class}">{message["content"]}</div>', 
-                       unsafe_allow_html=True)
+def get_chat_history_for_file(file_name):
+    """Get chat history for a specific file"""
+    data_messages = [msg for msg in st.session_state.data_messages if msg.get("file_name") == file_name]
+    doc_messages = [msg for msg in st.session_state.doc_messages if msg.get("file_name") == file_name]
+    return {
+        "data": data_messages,
+        "document": doc_messages
+    }
 
-    # Chat input processing
-    if prompt := st.chat_input("What would you like to know about your data? 💬"):
-        if not st.session_state.current_file:
-            st.warning("Please upload a file first!")
-            st.stop()
+def download_chat_history(file_name):
+    """Generate downloadable chat history for a file"""
+    history = get_chat_history_for_file(file_name)
+    
+    # Combine all messages and format them
+    formatted_history = []
+    for chat_type, messages in history.items():
+        if messages:
+            formatted_history.append(f"\n=== {chat_type.upper()} CHAT ===\n")
+            for msg in messages:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                formatted_history.append(f"\n[{role}]:\n{msg['content']}\n")
+    
+    return "\n".join(formatted_history)
+
+def display_chat_interface(chat_type="data"):
+    """Display enhanced chat interface with modern styling"""
+    if not st.session_state.current_file:
+        st.markdown("""
+            <div class="card" style="text-align: center; padding: 3rem;">
+                <h2>👋 Welcome to DataQnA AI</h2>
+                <p style="color: var(--text); opacity: 0.8;">Upload a file in the sidebar to start analyzing your data</p>
+                <div style="max-width: 500px; margin: 2rem auto;">
+                    <h3>📄 Get Started</h3>
+                    <p>Use the file uploader in the sidebar to begin</p>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    # Display minimalist file context banner
+    st.markdown(f"""
+        <div class="file-context-banner">
+            <div class="file-info">
+                <span class="file-context-icon">{'📊' if chat_type == 'data' else '📄'}</span>
+                <div class="file-context-info">
+                    <div class="file-context-name">{st.session_state.current_file.name}</div>
+                </div>
+            </div>
+            <div class="file-actions">
+                <button class="button button-secondary" onclick="clearChat()">🗑️ Clear</button>
+                <button class="button button-primary" onclick="downloadChat()">📥 Save</button>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Chat messages container
+    st.markdown('<div class="chat-thread">', unsafe_allow_html=True)
+    
+    # Get messages for current file
+    messages = st.session_state.data_messages if chat_type == "data" else st.session_state.doc_messages
+    current_file_messages = [msg for msg in messages 
+                           if msg.get("file_name") == st.session_state.current_file.name]
+    
+    # Display messages with enhanced styling
+    for message in current_file_messages:
+        role_class = "user-message" if message["role"] == "user" else "assistant-message"
+        st.markdown(f"""
+            <div class="chat-message {role_class}">
+                <div class="message-content">{message["content"]}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Enhanced chat input area
+
+def display_performance_metrics():
+    """Display performance metrics in a modern grid layout"""
+    st.markdown("""
+        <div class="metrics-grid">
+    """, unsafe_allow_html=True)
+    
+    # Calculate metrics
+    if st.session_state.response_times:
+        avg_time = sum(st.session_state.response_times) / len(st.session_state.response_times)
+        total_queries = len(st.session_state.response_times)
+        avg_tokens = sum(st.session_state.token_counts) / len(st.session_state.token_counts) if st.session_state.token_counts else 0
+        avg_rating = sum(r["rating"] for r in st.session_state.ratings) / len(st.session_state.ratings) if st.session_state.ratings else 0
+        
+        metrics = [
+            {"label": "Total Queries", "value": f"{total_queries}", "icon": "🔍"},
+            {"label": "Avg Response Time", "value": f"{avg_time:.2f}s", "icon": "⚡"},
+            {"label": "Avg Token Usage", "value": f"{avg_tokens:.0f}", "icon": "🎯"},
+            {"label": "User Satisfaction", "value": f"{avg_rating:.1f}/5", "icon": "⭐"}
+        ]
+        
+        # Create metric cards
+        for metric in metrics:
+            st.markdown(f"""
+                <div class="metric-card">
+                    <div style="font-size: 2rem;">{metric['icon']}</div>
+                    <div class="metric-value">{metric['value']}</div>
+                    <div style="color: var(--text); opacity: 0.8;">{metric['label']}</div>
+                </div>
+            """, unsafe_allow_html=True)
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def show_loading_animation():
+    """Display an animated loading indicator"""
+    st.markdown("""
+        <div class="loading-container" style="text-align: center; padding: 2rem;">
+            <div class="loading"></div>
+            <p style="color: var(--text); opacity: 0.8; margin-top: 1rem;">
+                Processing your request...
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
+
+def show_file_processing_progress(file_name, progress):
+    """Show file processing progress with animated bar"""
+    st.markdown(f"""
+        <div class="progress-container">
+            <p style="margin-bottom: 0.5rem;">Processing: {file_name}</p>
+            <div class="progress-bar">
+                <div class="progress-bar-fill" style="width: {progress}%;"></div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def show_success_toast(message):
+    """Show a success toast notification"""
+    st.markdown(f"""
+        <div class="toast success-toast">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <span style="color: var(--success-color);">✓</span>
+                <span>{message}</span>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def show_error_toast(message):
+    """Show an error toast notification"""
+    st.markdown(f"""
+        <div class="toast error-toast">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <span style="color: var(--error-color);">⚠</span>
+                <span>{message}</span>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def display_file_manager():
+    """Display the file manager interface"""
+    st.markdown("""
+        <div style="text-align: center; padding: 2rem 0;">
+            <h1 style="color: var(--primary-color);">📁 File Manager</h1>
+            <p style="color: var(--text); opacity: 0.8;">Manage your uploaded files</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    if not st.session_state.uploaded_files:
+        st.info("No files uploaded yet. Use the file uploader in the sidebar to get started.")
+        return
+    
+    # Display file list in modern cards
+    for file_key, file in st.session_state.uploaded_files.items():
+        file_type = "📊" if file.name.lower().endswith(tuple(Config.supported_structured_data)) else "📄"
+        st.markdown(f"""
+            <div class="file-card">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; align-items: center; gap: 1rem;">
+                        <span style="font-size: 1.5rem;">{file_type}</span>
+                        <div>
+                            <div style="font-weight: bold;">{file.name}</div>
+                            <div style="font-size: 0.8rem; opacity: 0.7;">
+                                Type: {os.path.splitext(file.name)[1].upper()[1:]}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.button(f"Select '{file.name}'", key=f"select_{file_key}"):
+                st.session_state.current_file = file
+                st.success(f"Selected {file.name}")
+                
+        with col2:
+            if st.button(f"Remove", key=f"remove_{file_key}"):
+                del st.session_state.uploaded_files[file_key]
+                if st.session_state.current_file and st.session_state.current_file.name == file.name:
+                    st.session_state.current_file = None
+                st.success(f"Removed {file.name}")
+                st.experimental_rerun()
+
+if selected_section == "Data Chat":
+    if not st.session_state.current_file or os.path.splitext(st.session_state.current_file.name)[1].lower()[1:] not in Config.supported_structured_data:
+        st.markdown(
+            """
+            <h1 style="color: #4B8BBE; text-align: center;">📊 Data Analysis Chat</h1>
+            <h3 style="text-align: center;">Upload structured data (CSV, Excel, JSON) to begin analysis</h3>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.info("Please upload a structured data file (CSV, Excel, or JSON) in the sidebar to start the analysis.")
+    else:
+        st.markdown(
+            """
+            <h1 style="color: #4B8BBE; text-align: center;">📊 Data Analysis Chat</h1>
+            <h3 style="text-align: center;">Ask questions about your data in natural language</h3>
+            """,
+            unsafe_allow_html=True,
+        )
+        
+        # Display chat interface with persistent history
+        display_chat_interface(chat_type="data")
+        
+        # Chat input and processing
+        if prompt := st.chat_input("What would you like to know about your data? 💬"):
+            # Add user message with file reference
+            new_message = {
+                "role": "user",
+                "content": prompt,
+                "chat_type": "data",
+                "file_name": st.session_state.current_file.name if st.session_state.current_file else None
+            }
+            st.session_state.data_messages.append(new_message)
             
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+            with st.chat_message("user"):
+                st.markdown(prompt)
             
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            full_response = ""
-            
-            # Initialize metrics
-            start_time = time.time()
-            token_count = 0
-            
-            try:
-                # Get the query engine for this file
-                file_key = f"{session_id}-{st.session_state.current_file.name}-{model_key}-{embedding_key}"
-                if file_key not in st.session_state.file_cache:
-                    st.error("File not indexed. Please try uploading again.")
-                    st.stop()
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
+                viz_params = None
+                
+                try:
+                    # Get the query engine for this file
+                    file_key = f"{session_id}-{st.session_state.current_file.name}-{model_key}-{embedding_key}"
+                    if file_key not in st.session_state.file_cache:
+                        st.error("File not indexed. Please try uploading again.")
+                        st.stop()
+                        
+                    query_engine = st.session_state.file_cache[file_key]
                     
-                query_engine = st.session_state.file_cache[file_key]
-                
-                # Setup token counter for this query
-                token_counter = TokenCountingHandler()
-                Settings.callback_manager = CallbackManager([token_counter])
-                
-                # Execute query
-                streaming_response = query_engine.query(prompt)
-                
-                # Process streaming response
-                for chunk in streaming_response.response_gen:
-                    full_response += chunk
-                    # Format the response with enhanced code block handling
+                    # Setup token counter for this query
+                    token_counter = TokenCountingHandler()
+                    Settings.callback_manager = CallbackManager([token_counter])
+                    
+                    # Initialize metrics
+                    start_time = time.time()
+                    token_count = 0
+
+                    # Execute query
+                    streaming_response = query_engine.query(prompt)
+                    
+                    # Process streaming response
+                    for chunk in streaming_response.response_gen:
+                        full_response += chunk
+                        # Check for visualization in the response
+                        current_viz = parse_visualization_request(full_response, get_dataframe_from_file(st.session_state.current_file))
+                        if current_viz:
+                            viz_params = current_viz
+                        # Format the response without showing JSON
+                        formatted_response = format_response(full_response)
+                        message_placeholder.markdown(
+                            formatted_response + "▌", 
+                            unsafe_allow_html=True
+                        )
+                    
+                    # Calculate response time
+                    response_time = time.time() - start_time
+                    st.session_state.response_times.append(response_time)
+                    
+                    # Final display of formatted response
                     formatted_response = format_response(full_response)
                     message_placeholder.markdown(
-                        formatted_response + "▌", 
+                        formatted_response,
                         unsafe_allow_html=True
                     )
-                
-                # Final display with syntax highlighting
-                message_placeholder.markdown(
-                    format_response(full_response),
-                    unsafe_allow_html=True
-                )
-                
-                # Check for visualization requests in the response
-                if st.session_state.current_file:
-                    # Get the DataFrame
-                    df = get_dataframe_from_file(st.session_state.current_file)
                     
-                    # Parse visualization request
-                    viz_params = parse_visualization_request(full_response, df)
+                    # Store assistant response with file reference
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": formatted_response,
+                        "chat_type": "data",
+                        "file_name": st.session_state.current_file.name
+                    }
+                    st.session_state.data_messages.append(assistant_message)
+                    
+                    # Generate visualization if params were found
                     if viz_params:
-                        st.subheader("📊 Data Visualization")
+                        df = get_dataframe_from_file(st.session_state.current_file)
                         try:
                             fig = generate_visualization(
                                 df=df,
@@ -399,56 +840,182 @@ if selected_section == "Chat":
                                 color_col=viz_params.get("color_column"),
                                 title=viz_params.get("title", "Data Visualization")
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                            with st.container():
+                                st.plotly_chart(fig, use_container_width=True)
                         except Exception as e:
                             st.error(f"Error generating visualization: {str(e)}")
-                
-                # Calculate and store metrics
-                response_time = time.time() - start_time
-                st.session_state.response_times.append(response_time)
-                
-                # Get token count if available
-                if hasattr(token_counter, 'total_llm_token_count'):
-                    token_count = token_counter.total_llm_token_count
-                    if token_count > 0:
-                        st.session_state.token_counts.append(token_count)
-                
-                # Display metrics in sidebar
-                with st.sidebar:
-                    st.markdown("### ⚙️ Response Metrics")
-                    st.info(f"Response time: {response_time:.2f} seconds")
-                    if token_count > 0:
-                        st.info(f"Tokens used: {token_count}")
                     
-                    # Source feedback - only if sources are available
-                    if hasattr(streaming_response, 'sources') and streaming_response.sources:
-                        with st.expander("View Source Chunks", expanded=False):
-                            st.write(streaming_response.sources)
+                    # Rest of the metrics and feedback code...
+                    
+                    if hasattr(token_counter, 'total_llm_token_count'):
+                        token_count = token_counter.total_llm_token_count
+                        if token_count > 0:
+                            st.session_state.token_counts.append(token_count)
+                    
+                    with st.sidebar:
+                        st.markdown("### ⚙️ Response Metrics")
+                        st.info(f"Response time: {response_time:.2f} seconds")
+                        if token_count > 0:
+                            st.info(f"Tokens used: {token_count}")
                         
-                        source_quality = st.radio("Were the retrieved chunks relevant?", 
-                                                ["Yes", "Partially", "No"])
-                        if st.button("Submit Source Feedback"):
-                            st.session_state.source_feedback.append({
+                        if hasattr(streaming_response, 'sources') and streaming_response.sources:
+                            with st.expander("View Source Chunks", expanded=False):
+                                st.write(streaming_response.sources)
+                            
+                            source_quality = st.radio("Were the retrieved chunks relevant?", 
+                                                    ["Yes", "Partially", "No"])
+                            if st.button("Submit Source Feedback"):
+                                st.session_state.source_feedback.append({
+                                    "query": prompt, 
+                                    "rating": source_quality
+                                })
+                                st.success("Thank you for your feedback!")
+                        
+                        user_rating = st.slider("Rate answer accuracy (1-5)", 1, 5, 3)
+                        if st.button("Submit Rating"):
+                            st.session_state.ratings.append({
                                 "query": prompt, 
-                                "rating": source_quality
+                                "rating": user_rating
                             })
                             st.success("Thank you for your feedback!")
+                        
+                except Exception as e:
+                    error_msg = f"Error generating response: {str(e)}"
+                    message_placeholder.error(error_msg)
+                    full_response = error_msg
                     
-                    # Response quality rating
-                    user_rating = st.slider("Rate answer accuracy (1-5)", 1, 5, 3)
-                    if st.button("Submit Rating"):
-                        st.session_state.ratings.append({
-                            "query": prompt, 
-                            "rating": user_rating
-                        })
-                        st.success("Thank you for your feedback!")
-                    
-            except Exception as e:
-                error_msg = f"Error generating response: {str(e)}"
-                message_placeholder.error(error_msg)
-                full_response = error_msg
+            st.session_state.data_messages.append({"role": "assistant", "content": full_response})
+
+elif selected_section == "Document Chat":
+    if not st.session_state.current_file or os.path.splitext(st.session_state.current_file.name)[1].lower()[1:] not in Config.supported_documents:
+        st.markdown(
+            """
+            <h1 style="color: #4B8BBE; text-align: center;">📄 Document Chat</h1>
+            <h3 style="text-align: center;">Upload PDF documents to begin analysis</h3>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.info("Please upload a PDF document in the sidebar to start the conversation.")
+    else:
+        st.markdown(
+            """
+            <h1 style="color: #4B8BBE; text-align: center;">📄 Document Chat</h1>
+            <h3 style="text-align: center;">Ask questions about your document</h3>
+            """,
+            unsafe_allow_html=True,
+        )
+        
+        # Display chat interface with persistent history for documents
+        display_chat_interface(chat_type="document")
+        
+        # Chat input processing for document analysis
+        if prompt := st.chat_input("What would you like to know about your document? 💬"):
+            # Add user message with file reference
+            new_message = {
+                "role": "user",
+                "content": prompt,
+                "chat_type": "document",
+                "file_name": st.session_state.current_file.name if st.session_state.current_file else None
+            }
+            st.session_state.doc_messages.append(new_message)
+            
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
                 
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
+                try:
+                    # Get the query engine for this file
+                    file_key = f"{session_id}-{st.session_state.current_file.name}-{model_key}-{embedding_key}"
+                    if file_key not in st.session_state.file_cache:
+                        st.error("File not indexed. Please try uploading again.")
+                        st.stop()
+                        
+                    query_engine = st.session_state.file_cache[file_key]
+                    
+                    # Setup token counter for this query
+                    token_counter = TokenCountingHandler()
+                    Settings.callback_manager = CallbackManager([token_counter])
+                    
+                    # Initialize metrics
+                    start_time = time.time()
+                    token_count = 0
+
+                    # Execute query
+                    streaming_response = query_engine.query(prompt)
+                    
+                    # Process streaming response
+                    for chunk in streaming_response.response_gen:
+                        full_response += chunk
+                        # Format the response without showing JSON
+                        formatted_response = format_response(full_response)
+                        message_placeholder.markdown(
+                            formatted_response + "▌", 
+                            unsafe_allow_html=True
+                        )
+                    
+                    # Calculate response time
+                    response_time = time.time() - start_time
+                    st.session_state.response_times.append(response_time)
+                    
+                    # Final display of formatted response
+                    formatted_response = format_response(full_response)
+                    message_placeholder.markdown(
+                        formatted_response,
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Store assistant response with file reference for document chat
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": formatted_response,
+                        "chat_type": "document",
+                        "file_name": st.session_state.current_file.name
+                    }
+                    st.session_state.doc_messages.append(assistant_message)
+                    
+                    # Rest of the metrics and feedback code...
+                    
+                    if hasattr(token_counter, 'total_llm_token_count'):
+                        token_count = token_counter.total_llm_token_count
+                        if token_count > 0:
+                            st.session_state.token_counts.append(token_count)
+                    
+                    with st.sidebar:
+                        st.markdown("### ⚙️ Response Metrics")
+                        st.info(f"Response time: {response_time:.2f} seconds")
+                        if token_count > 0:
+                            st.info(f"Tokens used: {token_count}")
+                        
+                        if hasattr(streaming_response, 'sources') and streaming_response.sources:
+                            with st.expander("View Source Chunks", expanded=False):
+                                st.write(streaming_response.sources)
+                            
+                            source_quality = st.radio("Were the retrieved chunks relevant?", 
+                                                    ["Yes", "Partially", "No"])
+                            if st.button("Submit Source Feedback"):
+                                st.session_state.source_feedback.append({
+                                    "query": prompt, 
+                                    "rating": source_quality
+                                })
+                                st.success("Thank you for your feedback!")
+                        
+                        user_rating = st.slider("Rate answer accuracy (1-5)", 1, 5, 3)
+                        if st.button("Submit Rating"):
+                            st.session_state.ratings.append({
+                                "query": prompt, 
+                                "rating": user_rating
+                            })
+                            st.success("Thank you for your feedback!")
+                        
+                except Exception as e:
+                    error_msg = f"Error generating response: {str(e)}"
+                    message_placeholder.error(error_msg)
+                    full_response = error_msg
+                    
+            st.session_state.doc_messages.append({"role": "assistant", "content": full_response})
 
 elif selected_section == "Data Explorer":
     st.markdown(
@@ -644,26 +1211,23 @@ elif selected_section == "Data Explorer":
     else:
         st.info("Please upload a file in the sidebar to explore data.")
 
-else:  # Performance Analytics
-    st.markdown(
-        """
-        <h1 style="color: #4B8BBE; text-align: center;">📈 Performance Analytics</h1>
-        """,
-        unsafe_allow_html=True,
-    )
-    
-    # Performance Analytics code
-    # Response time metrics, token usage, etc.
+elif selected_section == "File Manager":
+    display_file_manager()
+
+elif selected_section == "Performance Analytics":
     st.markdown("""
         <div style="text-align: center; padding: 2rem 0;">
-            <h2 style="color: var(--primary-color);">📊 Performance Analytics</h2>
+            <h1 style="color: var(--primary-color);">📈 Performance Analytics</h1>
+            <p style="color: var(--text); opacity: 0.8;">Track and analyze system performance metrics</p>
         </div>
     """, unsafe_allow_html=True)
+    
+    # Display metrics grid
+    display_performance_metrics()
     
     # Response time metrics
     if st.session_state.response_times:
         avg_time = sum(st.session_state.response_times) / len(st.session_state.response_times)
-        st.metric("Average Response Time", f"{avg_time:.2f}s")
         
         # Plot response times
         times_df = pd.DataFrame({
@@ -680,10 +1244,6 @@ else:  # Performance Analytics
     
     # Token usage metrics
     if st.session_state.token_counts:
-        avg_tokens = sum(st.session_state.token_counts) / len(st.session_state.token_counts)
-        st.metric("Average Token Usage", f"{avg_tokens:.0f} tokens")
-        
-        # Plot token usage
         tokens_df = pd.DataFrame({
             "query": range(1, len(st.session_state.token_counts) + 1),
             "tokens": st.session_state.token_counts
@@ -699,8 +1259,6 @@ else:  # Performance Analytics
     # User ratings visualization
     if st.session_state.ratings:
         ratings = [r["rating"] for r in st.session_state.ratings]
-        avg_rating = sum(ratings) / len(ratings)
-        st.metric("Average Accuracy Rating", f"{avg_rating:.1f}/5")
         
         # Rating distribution
         rating_df = pd.DataFrame({"rating": ratings})
@@ -741,7 +1299,6 @@ else:  # Performance Analytics
     # Instead of comparison, just show current model's performance
     if st.session_state.response_times:
         st.info("Model: Mistral Small (Free)")
-        # ...existing performance metrics code...
     
     # Export performance data
     if st.session_state.response_times:
@@ -750,7 +1307,7 @@ else:  # Performance Analytics
         # Prepare data for export
         export_data = {
             "response_times": st.session_state.response_times,
-            "model_used": model_key
+            "model_used": Config.DEFAULT_MODEL
         }
         
         if st.session_state.token_counts:
@@ -766,7 +1323,7 @@ else:  # Performance Analytics
         export_df = pd.DataFrame({
             "query_num": range(1, len(st.session_state.response_times) + 1),
             "response_time": st.session_state.response_times,
-            "model": [model_key] * len(st.session_state.response_times)
+            "model": [Config.DEFAULT_MODEL] * len(st.session_state.response_times)
         })
         
         if st.session_state.token_counts and len(st.session_state.token_counts) == len(st.session_state.response_times):
