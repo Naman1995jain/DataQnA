@@ -11,7 +11,7 @@ class ModelConfig:
 
 @dataclass
 class AppConfig:
-    title: str = "AI Data Analyst"
+    title: str = "AI Document & Data Analyst"
     models: Dict[str, ModelConfig] = None
     supported_file_types: List[str] = None
     max_file_size_mb: int = 500
@@ -24,10 +24,12 @@ class AppConfig:
                 name="mistralai/mistral-small-3.1-24b-instruct:free",
                 api_key_env="OPENROUTER_API_KEY",
                 max_tokens=40000,
-                temperature=0.2
+                temperature=0.7
             )
         }
-        self.supported_file_types = ["xlsx", "xls", "csv"]
+        self.supported_structured_data = ["xlsx", "xls", "csv", "json"]
+        self.supported_documents = ["pdf", "PDF"]
+        self.supported_file_types = self.supported_structured_data + self.supported_documents
 
     def validate_environment(self) -> List[str]:
         missing_vars = []
