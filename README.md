@@ -5,7 +5,6 @@ DataQnA AI is an intelligent platform that empowers users to interact with struc
 ---
 
 ## 🚀 Features
-
 - 🔍 **Natural Language Interface**: Query data conversationally.
 - 📊 **Auto-Visualization**: Generates charts/graphs based on queries.
 - 🧠 **RAG Model Integration**: Combines retrieval with LLMs for accurate, contextual responses.
