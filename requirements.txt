@@ -17,3 +17,7 @@ huggingface-hub
 scikit-learn
 matplotlib
 seaborn
+requests
+beautifulsoup4 
+validators
+youtube-transcript-api
