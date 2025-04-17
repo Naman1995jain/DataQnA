@@ -459,7 +459,7 @@ class DataQnAApp:
                     if chat_type == "data":
                         current_viz = self.visualization_manager.parse_visualization_request(
                             full_response, 
-                            self.file_handler.get_dataframe_from_file(current_file)
+                            self.file_handler.get_dataframe_from_file(current_content)
                         )
                         if current_viz:
                             viz_params = current_viz
@@ -496,7 +496,7 @@ class DataQnAApp:
                 
                 # Generate visualization if params were found and it's a data chat
                 if viz_params and chat_type == "data":
-                    df = self.file_handler.get_dataframe_from_file(current_file)
+                    df = self.file_handler.get_dataframe_from_file(current_content)
                     try:
                         fig = self.visualization_manager.generate_visualization(
                             df=df,
@@ -536,8 +536,7 @@ class DataQnAApp:
             except Exception as e:
                 error_msg = f"Error generating response: {str(e)}"
                 message_placeholder.error(error_msg)
-                full_response = error_msg
-    
+                full_response = error_msg    
     def display_data_explorer(self):
         """
         Display the data explorer interface.
