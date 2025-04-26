@@ -16,7 +16,7 @@ class ConfigManager:
     """
     def __init__(self):
         # Application settings
-        self.title = "DataQnA AI"
+        self.title = "DataQnA"
         self.cache_dir = ".cache"
         
         # Model configurations
