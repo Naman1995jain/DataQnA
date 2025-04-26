@@ -64,12 +64,12 @@ class UIManager:
                 <div class="navbar">
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 1rem;">
                         <div style="display: flex; align-items: center; gap: 1rem;">
-                            <h1 style="margin: 0;">🤖 DataQnA AI</h1>
+                            <h1 style="margin: 0;">🤖 DataQnA</h1>
                         </div>
                         <div class="nav-links" style="display: flex; gap: 1rem;">
-                            <a href="#" class="nav-link tooltip" data-tooltip="View Documentation">📚</a>
-                            <a href="#" class="nav-link tooltip" data-tooltip="Settings">⚙️</a>
-                            <a href="#" class="nav-link tooltip" data-tooltip="Help">❓</a>
+                            <a href="https://github.com/Naman1995jain/DataQnA/blob/master/README.md" class="nav-link tooltip" data-tooltip="View Documentation">📚</a>
+                            <a href="https://github.com/Naman1995jain/DataQnA" class="nav-link tooltip" data-tooltip="Settings">⚙️</a>
+                            <a href="https://www.linkedin.com/in/naman-jain-226135201/" class="nav-link tooltip" data-tooltip="Help">❓</a>
                         </div>
                     </div>
                 </div>
@@ -103,12 +103,67 @@ class UIManager:
             # Display modern file upload zone
             self.display_file_upload_zone()
             
-            file_type = st.radio(
-                "Select content type",
-                ["Structured Data (CSV, Excel, JSON)", "Documents (PDF)", "Website URL", "YouTube URL"],
-                key="file_type",
-                help="Choose the type of content you want to analyze"
-            )
+            # Create icon-based content type selection
+            st.markdown("""
+                <div style="margin-bottom: 1rem;">
+                    <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">Select content type</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Create a row of icon buttons for content type selection
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                structured_data_selected = st.button(
+                    "📊", 
+                    help="Structured Data (CSV, Excel, JSON)",
+                    key="structured_data_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Data</div>", unsafe_allow_html=True)
+                
+            with col2:
+                documents_selected = st.button(
+                    "📄", 
+                    help="Documents (PDF)",
+                    key="documents_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>PDF</div>", unsafe_allow_html=True)
+                
+            with col3:
+                website_selected = st.button(
+                    "🌐", 
+                    help="Website URL",
+                    key="website_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Web</div>", unsafe_allow_html=True)
+                
+            with col4:
+                youtube_selected = st.button(
+                    "📺", 
+                    help="YouTube URL",
+                    key="youtube_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>YouTube</div>", unsafe_allow_html=True)
+            
+            # Determine selected file type based on button clicks
+            if structured_data_selected:
+                file_type = "Structured Data (CSV, Excel, JSON)"
+            elif documents_selected:
+                file_type = "Documents (PDF)"
+            elif website_selected:
+                file_type = "Website URL"
+            elif youtube_selected:
+                file_type = "YouTube URL"
+            else:
+                # Default to the value in session state or set a default
+                file_type = st.session_state.get("file_type", "Structured Data (CSV, Excel, JSON)")
+            
+            # Store the selected file type in session state
+            st.session_state["file_type"] = file_type
             
             # Call the file type callback
             file_type_callback(file_type)
@@ -178,12 +233,100 @@ class UIManager:
                 </div>
             """, unsafe_allow_html=True)
             
-            # Navigation selection
-            selected_section = st.radio(
-                "Select Section",
-                ["Data Chat", "Document Chat", "Website Chat", "YouTube Chat", "Data Explorer", "Performance Analytics", "File Manager"],
-                key="navigation"
-            )
+            # Navigation selection with icon buttons
+            # First row of navigation icons
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                data_chat_selected = st.button(
+                    "💬", 
+                    help="Data Chat",
+                    key="data_chat_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Data Chat</div>", unsafe_allow_html=True)
+                
+            with col2:
+                doc_chat_selected = st.button(
+                    "📝", 
+                    help="Document Chat",
+                    key="doc_chat_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Doc Chat</div>", unsafe_allow_html=True)
+                
+            with col3:
+                web_chat_selected = st.button(
+                    "🌐", 
+                    help="Website Chat",
+                    key="web_chat_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Web Chat</div>", unsafe_allow_html=True)
+            
+            # Second row of navigation icons
+            col4, col5, col6 = st.columns(3)
+            
+            with col4:
+                youtube_chat_selected = st.button(
+                    "📺", 
+                    help="YouTube Chat",
+                    key="youtube_chat_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>YT Chat</div>", unsafe_allow_html=True)
+                
+            with col5:
+                explorer_selected = st.button(
+                    "📊", 
+                    help="Data Explorer",
+                    key="explorer_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Explorer</div>", unsafe_allow_html=True)
+                
+            with col6:
+                analytics_selected = st.button(
+                    "📈", 
+                    help="Performance Analytics",
+                    key="analytics_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Analytics</div>", unsafe_allow_html=True)
+            
+            # Third row for file manager
+            col7, col8, col9 = st.columns(3)
+            
+            with col8:
+                file_manager_selected = st.button(
+                    "📁", 
+                    help="File Manager",
+                    key="file_manager_btn",
+                    use_container_width=True
+                )
+                st.markdown("<div style='text-align: center; font-size: 0.7rem;'>Files</div>", unsafe_allow_html=True)
+            
+            # Determine selected section based on button clicks
+            if data_chat_selected:
+                selected_section = "Data Chat"
+            elif doc_chat_selected:
+                selected_section = "Document Chat"
+            elif web_chat_selected:
+                selected_section = "Website Chat"
+            elif youtube_chat_selected:
+                selected_section = "YouTube Chat"
+            elif explorer_selected:
+                selected_section = "Data Explorer"
+            elif analytics_selected:
+                selected_section = "Performance Analytics"
+            elif file_manager_selected:
+                selected_section = "File Manager"
+            else:
+                # Default to the value in session state or set a default
+                selected_section = st.session_state.get("navigation", "Data Chat")
+            
+            # Store the selected section in session state
+            st.session_state["navigation"] = selected_section
             
             return selected_section
     
@@ -489,8 +632,29 @@ class UIManager:
                     st.error(f"Error generating visualization: {str(e)}")
             elif viz_type == "heatmap":
                 # For heatmap, we need to decide if we're showing correlation or crosstab
-                heatmap_type = st.radio("Heatmap Type", ["Correlation Matrix", "Cross Tabulation"])
+                st.write("Heatmap Type:")
+                col1, col2 = st.columns(2)
                 
+                with col1:
+                    corr_matrix_selected = st.button(
+                        "📊 Correlation Matrix", 
+                        help="Show correlation between numeric columns",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    cross_tab_selected = st.button(
+                        "🔄 Cross Tabulation", 
+                        help="Show relationship between two categorical columns",
+                        use_container_width=True
+                    )
+                
+                # Default to correlation matrix if neither is explicitly selected yet
+                if not cross_tab_selected and (corr_matrix_selected or not cross_tab_selected):
+                    heatmap_type = "Correlation Matrix"
+                else:
+                    heatmap_type = "Cross Tabulation"
+                    
                 if heatmap_type == "Correlation Matrix":
                     # Filter to only numeric columns
                     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
