@@ -19,7 +19,7 @@ DataQnA AI is an intelligent platform that empowers users to interact with struc
 
 ### 🔷 Use Case Diagram
 Shows the interaction between users and system components.
-![Use Case Diagram](images/use_case_diagram.png)
+![Use Case Diagram](images/use_case.png)
 
 ### 🔄 Activity Diagram
 Illustrates how a user interacts from query input to result output.
